@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=overlays-content">
+<title>3D Spinning Apples</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #101820; font-family: system-ui, sans-serif; overflow: hidden; }
+  #bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 2; height: 56px; box-sizing: border-box;
+    display: flex; gap: 8px; align-items: center; justify-content: center;
+    padding: 0 10px; background: rgba(0,0,0,.55); color: #fff;
+  }
+  #bar input { width: 100px; padding: 8px; font-size: 16px; border-radius: 8px; border: 0; }
+  #bar button { padding: 8px 14px; font-size: 16px; border-radius: 8px; border: 0; background: #e63946; color: #fff; cursor: pointer; }
+  #count { font-size: 14px; opacity: .8; }
+  canvas { display: block; position: fixed; top: 0; left: 0; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <label for="n">Apples:</label>
+  <input id="n" type="number" min="0" value="30" inputmode="numeric">
+  <button id="go">Spawn</button>
+  <span id="count"></span>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const BAR_PX = 56;          // height of the top bar
+const CELL = 2.6;           // grid cell size in world units
+const MAX_R = 1.15;         // max apple radius at scale 1 (body + widening)
+
+const input = document.getElementById('n');
+const countEl = document.getElementById('count');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101820);
+
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 5000);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+sun.position.set(10, 20, 25);
+scene.add(sun);
+const rim = new THREE.PointLight(0xffd7a8, 0.6, 0);
+rim.position.set(-20, -10, 15);
+scene.add(rim);
+
+// ---------- apple geometry ----------
+function buildAppleBody() {
+  const g = new THREE.SphereGeometry(1, 40, 30);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    let x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const r2 = x * x + z * z;
+    const top = Math.max(0, y);
+    const bottom = Math.max(0, -y);
+    y = y * 0.92 - 0.5 * Math.exp(-r2 / 0.1) * top + 0.14 * Math.exp(-r2 / 0.12) * bottom;
+    const s = 1 + 0.1 * y;
+    p.setXYZ(i, x * s, y, z * s);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+function buildStem() {
+  const g = new THREE.CylinderGeometry(0.035, 0.05, 0.5, 8);
+  g.rotateZ(-0.2);
+  g.translate(0.05, 0.62, 0);
+  return g;
+}
+function buildLeaf() {
+  const g = new THREE.SphereGeometry(1, 12, 8);
+  g.scale(0.38, 0.04, 0.17);
+  g.rotateZ(0.5);
+  g.translate(0.28, 0.9, 0);
+  return g;
+}
+
+const bodyGeo = buildAppleBody();
+const stemGeo = buildStem();
+const leafGeo = buildLeaf();
+const bodyMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 });
+const stemMat = new THREE.MeshStandardMaterial({ color: 0x5b3a1e, roughness: 0.9 });
+const leafMat = new THREE.MeshStandardMaterial({ color: 0x3fa34d, roughness: 0.6, side: THREE.DoubleSide });
+
+// ---------- apple field ----------
+let bodies = null, stems = null, leaves = null;
+let data = [];
+const dummy = new THREE.Object3D();
+const qSpin = new THREE.Quaternion();
+const rand = (a, b) => a + Math.random() * (b - a);
+
+const reds = [0xd62828, 0xe63946, 0xc1121f, 0xd00000, 0x9d0208];
+function pickColor() {
+  const r = Math.random();
+  if (r < 0.8) return new THREE.Color(reds[Math.floor(Math.random() * reds.length)]);
+  if (r < 0.92) return new THREE.Color(0x7fb800);
+  return new THREE.Color(0xf4c20d);
+}
+
+function clearField() {
+  for (const m of [bodies, stems, leaves]) {
+    if (m) { scene.remove(m); m.dispose(); }
+  }
+  bodies = stems = leaves = null;
+  data = [];
+}
+
+// Zoom the camera out (or in) so the whole grid is visible below the top bar.
+function fitCamera(cols, rows) {
+  const W = window.innerWidth, H = window.innerHeight;
+  const aspect = W / H;
+  const f = Math.min(0.3, BAR_PX / H);          // fraction of height covered by the bar
+  const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const gridW = cols * CELL, gridH = rows * CELL;
+  const MARGIN = 0.94;
+
+  let halfH = Math.max(
+    gridH / (2 * (1 - f) * MARGIN),
+    gridW / (2 * aspect * MARGIN)
+  );
+  halfH = Math.max(halfH, 5);                    // don't zoom in absurdly for tiny counts
+
+  camera.position.set(0, 0, halfH / tanHalf);
+  camera.lookAt(0, 0, 0);
+  // shift the grid centre into the usable area under the bar
+  return -halfH * f;
+}
+
+function spawn() {
+  let n = Math.floor(Number(input.value));
+  if (!Number.isFinite(n) || n < 0) n = 0;
+  input.value = n;
+  clearField();
+  countEl.textContent = n + ' apples';
+  if (n === 0) return;
+
+  const W = window.innerWidth, H = window.innerHeight;
+  const f = Math.min(0.3, BAR_PX / H);
+  const usableAspect = W / (H * (1 - f));
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n * usableAspect)));
+  const rows = Math.ceil(n / cols);
+  const yShift = fitCamera(cols, rows);
+
+  bodies = new THREE.InstancedMesh(bodyGeo, bodyMat, n);
+  stems = new THREE.InstancedMesh(stemGeo, stemMat, n);
+  leaves = new THREE.InstancedMesh(leafGeo, leafMat, n);
+  for (const m of [bodies, stems, leaves]) {
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    m.frustumCulled = false;
+    scene.add(m);
+  }
+
+  // Each apple lives in its own grid cell and never leaves it -> no overlap.
+  for (let i = 0; i < n; i++) {
+    const col = i % cols, row = Math.floor(i / cols);
+    const inRow = (row === rows - 1) ? (n - row * cols) : cols;   // centre the last row
+    const rowOffset = (cols - inRow) * CELL / 2;
+
+    const s = rand(0.72, 0.98);
+    const slack = Math.max(0, CELL / 2 - MAX_R * s - 0.02);       // room left in the cell
+    const cx = -cols * CELL / 2 + CELL / 2 + col * CELL + rowOffset + rand(-slack, slack);
+    const cy = rows * CELL / 2 - CELL / 2 - row * CELL + yShift + rand(-slack, slack);
+
+    data.push({
+      x: cx, y: cy, z: 0, s,
+      axis: new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize(),
+      speed: rand(0.6, 3.2) * (Math.random() < 0.5 ? -1 : 1),
+      base: new THREE.Quaternion().setFromEuler(new THREE.Euler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28)))
+    });
+    bodies.setColorAt(i, pickColor());
+  }
+  bodies.instanceColor.needsUpdate = true;
+}
+
+document.getElementById('go').addEventListener('click', spawn);
+input.addEventListener('keydown', e => { if (e.key === 'Enter') { spawn(); input.blur(); } });
+
+// Only react to real width changes (rotation / window resize).
+// Opening the mobile keyboard only changes height, so it is ignored -> no glitch.
+let lastW = 0;
+function sizeRenderer() {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', () => {
+  if (window.innerWidth === lastW) return;
+  lastW = window.innerWidth;
+  sizeRenderer();
+  spawn();
+});
+lastW = window.innerWidth;
+sizeRenderer();
+
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+
+  if (bodies) {
+    for (let i = 0; i < data.length; i++) {
+      const d = data[i];
+      qSpin.setFromAxisAngle(d.axis, d.speed * t);
+      dummy.position.set(d.x, d.y, d.z);
+      dummy.quaternion.copy(qSpin).multiply(d.base);
+      dummy.scale.setScalar(d.s);
+      dummy.updateMatrix();
+      bodies.setMatrixAt(i, dummy.matrix);
+      stems.setMatrixAt(i, dummy.matrix);
+      leaves.setMatrixAt(i, dummy.matrix);
+    }
+    bodies.instanceMatrix.needsUpdate = true;
+    stems.instanceMatrix.needsUpdate = true;
+    leaves.instanceMatrix.needsUpdate = true;
+  }
+  renderer.render(scene, camera);
+}
+
+spawn();
+animate();
+</script>
+</body>
+</html>
