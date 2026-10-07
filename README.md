@@ -59,7 +59,7 @@ Where `skill_issue` is always `1`. We checked.
 
 ```bash
 git clone https://github.com/last1chan/Apple-Spinning-Theory.git
-cd spinning-apples
+cd Apple-Spinning-Theory
 # just open index.html in your browser, no install needed
 ```
 
